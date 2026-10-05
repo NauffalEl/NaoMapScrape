@@ -1,0 +1,11 @@
+playwright
+sqlalchemy
+pandas
+openpyxl
+rich
+click
+loguru
+pydantic
+beautifulsoup4
+lxml
+python-dotenv
