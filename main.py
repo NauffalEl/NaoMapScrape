@@ -29,6 +29,13 @@ async def main():
     parser.add_argument("--export", default="data/exports/leads.csv", help="Export path")
     parser.add_argument("--headless", action="store_true", default=True, help="Run browser in headless mode")
     parser.add_argument("--gui", action="store_false", dest="headless", help="Show browser window")
+    parser.add_argument(
+        "--no-details",
+        action="store_false",
+        dest="details",
+        default=True,
+        help="Skip detail-panel visits (faster, but phone/website stay empty)",
+    )
     
     args = parser.parse_args()
 
@@ -42,7 +49,8 @@ async def main():
 
     collector = Collector(
         headless=args.headless,
-        on_progress=on_progress
+        on_progress=on_progress,
+        details=args.details,
     )
 
     cli.start(args.limit)

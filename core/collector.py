@@ -22,6 +22,7 @@ class Collector:
         headless: bool = True,
         db_path: str = "data/naomapscrape.db",
         on_progress: Optional[Callable[[dict], None]] = None,
+        details: bool = True,
     ):
         self.scraper = GoogleMapsScraper(headless=headless)
         self.extractor = Extractor()
@@ -30,6 +31,7 @@ class Collector:
         self.db = Database(db_path)
         self.queue = Queue()
         self.on_progress = on_progress
+        self.details = details
         self._stop = False
 
     async def run(
@@ -54,6 +56,39 @@ class Collector:
                 try:
                     cards = await self.scraper.search(item.keyword, item.location)
                     raw = await self.extractor.extract_all(cards)
+
+                    # Phone/website only exist in the detail panel, so open it
+                    # per card and enrich. The feed is re-queried on every
+                    # iteration: opening/closing the panel re-renders the list
+                    # and makes a cached ElementHandle click the wrong card.
+                    #
+                    # Only the cards that can still land in the output are
+                    # enriched. Opening a panel costs seconds, so walking the
+                    # whole feed past `limit` wasted most of the runtime.
+                    if self.details:
+                        remaining = limit - len(collected)
+                        if remaining > 0:
+                            raw = raw[:remaining]
+
+                        enriched = []
+                        for idx, data in enumerate(raw):
+                            feed = await self.scraper.page.query_selector_all(
+                                'div[role="article"]'
+                            )
+                            if idx >= len(feed):
+                                break
+                            panel = await self.scraper.open_detail_panel(
+                                feed[idx], expect_name=data.get("raw_name")
+                            )
+                            if panel:
+                                data = await self.extractor.extract_detail(panel, data)
+                            await self.scraper.close_detail_panel()
+                            enriched.append(data)
+                        raw = enriched
+                        logger.info(
+                            "Enriched %d cards from detail panels", len(enriched)
+                        )
+
                     leads = self.parser.parse_all(raw, item.keyword, item.location)
                     leads = self._apply_website_filter(leads, website_filter)
                     fresh = self.deduplicator.filter(leads)

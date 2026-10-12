@@ -12,23 +12,38 @@ from typing import Optional
 
 
 def normalize_phone(raw: Optional[str]) -> Optional[str]:
-    """Strip everything except digits and a leading '+'."""
+    """Strip formatting and return a plausible Indonesian number.
+
+    Google mixes number shapes: "0812-3456-7890", "+62 812 3456 7890" and
+    "62-812-3456-7890". Stripping non-digits turns the latter two into 12+
+    digits, so a leading country code is trimmed back to the local form.
+    13 digits is allowed because some listings genuinely publish an extra
+    digit — dropping the whole lead over a suspect number costs a business.
+    """
     if not raw:
         return None
-    cleaned = re.sub(r"[^\d+]", "", raw)
-    if cleaned.count("+") > 0 and not cleaned.startswith("+"):
-        cleaned = cleaned.replace("+", "")
-    if cleaned.startswith("+"):
-        cleaned = "+" + cleaned[1:].replace("+", "")
-    return cleaned or None
+    cleaned = re.sub(r"[^\d]", "", raw)
+    if cleaned.startswith("0"):
+        local = cleaned
+    elif cleaned.startswith("62"):
+        local = "0" + cleaned[2:]
+    else:
+        local = cleaned
+    return local if 9 <= len(local) <= 13 else None
 
 
-def normalize_rating(raw: Optional[str]) -> Optional[float]:
-    """Parse a rating, comma or dot decimal, clamped to 0–5."""
+def normalize_rating(raw: Optional[float]) -> Optional[float]:
+    """Parse a rating, clamped to 0–5.
+
+    Cards render the score glued to its review count ("4,9(1.094)"), so the
+    leading score is taken and the parenthetical dropped rather than failing
+    the whole parse.
+    """
     if raw is None:
         return None
+    text = str(raw).split("(")[0].strip().replace(",", ".")
     try:
-        value = float(str(raw).replace(",", "."))
+        value = float(text)
     except ValueError:
         return None
     return round(max(0.0, min(5.0, value)), 1)
@@ -80,12 +95,26 @@ def resolve_website(raw: Optional[str]) -> tuple:
     return None, "NO_WEBSITE_DETECTED"
 
 
+def normalize_category(raw: Optional[str]) -> Optional[str]:
+    """First line of the category, with hours/price fragments removed.
+
+    A card row can carry the category and the opening hours glued together by
+    a newline ("Kafe\\nBuka"), so splitting on lines keeps only the category.
+    """
+    if not raw:
+        return None
+    first = raw.strip().splitlines()[0].strip()
+    first = re.sub(r"\s*[·|]\s*(Buka|Tutup|Open|Closed).*$", "", first, flags=re.I)
+    first = re.sub(r"\s*[·|]\s*Rp\s.*$", "", first, flags=re.I).strip()
+    return first or None
+
+
 def normalize(raw: dict) -> dict:
     """Normalize a raw extractor dict into clean fields."""
     website, website_status = resolve_website(raw.get("raw_website"))
     return {
         "name": (raw.get("raw_name") or "").strip() or None,
-        "category": (raw.get("raw_category") or "").strip() or None,
+        "category": normalize_category(raw.get("raw_category")),
         "address": normalize_address(raw.get("raw_address")),
         "phone": normalize_phone(raw.get("raw_phone")),
         "rating": normalize_rating(raw.get("raw_rating")),

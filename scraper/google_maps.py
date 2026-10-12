@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 from typing import List, Optional
 
 from playwright.async_api import async_playwright
@@ -76,6 +77,82 @@ class GoogleMapsScraper:
         cards = await self.page.query_selector_all('div[role="article"]')
         logger.info("Found %d cards for %s / %s", len(cards), keyword, location)
         return cards
+
+    async def open_detail_panel(self, card, expect_name: Optional[str] = None):
+        """Click a result card and return the detail panel handle.
+
+        Contact rows (phone, website) are only rendered inside the detail
+        panel, never on the feed card, so callers must open it before
+        enriching. Several role="region" nodes coexist and the detail panel
+        is the one carrying data-item-id="address"; role="dialog" matches an
+        invisible overlay instead.
+
+        expect_name is the card's business name. Google keeps the previous
+        panel mounted for a moment, so without this guard the query returns
+        the *previous* card's panel and every lead inherits its phone/website.
+        Waiting for the title to change is what keeps rows aligned.
+        """
+        if not self.page:
+            raise RuntimeError("Browser not started. Call start() first.")
+        try:
+            await card.scroll_into_view_if_needed(timeout=4000)
+            await card.click(timeout=6000)
+        except Exception as exc:
+            logger.debug("Card click failed: %s", exc)
+            return None
+
+        if expect_name:
+            needle = re.sub(r"\s+", " ", expect_name).strip()[:24].lower()
+            try:
+                await self.page.wait_for_function(
+                    """(needle) => {
+                        const panel = document.querySelector(
+                            'div[role="region"]:has([data-item-id="address"])');
+                        if (!panel) return false;
+                        const h1 = panel.querySelector('h1, .DUwDvf, [class*="title"]');
+                        return !!h1 && h1.textContent.toLowerCase().includes(needle);
+                    }""",
+                    arg=needle,
+                    timeout=6000,
+                )
+            except Exception:
+                logger.debug("Panel title never matched %r", needle)
+
+        try:
+            await self.page.wait_for_selector(
+                'div[role="region"] [data-item-id="address"]', timeout=6000
+            )
+        except Exception:
+            return None
+
+        return await self.page.query_selector(
+            'div[role="region"]:has([data-item-id="address"])'
+        )
+
+    async def close_detail_panel(self) -> None:
+        """Dismiss the detail panel so the feed is usable again.
+
+        Escape is tried first because the close button is inside the panel
+        Google just re-rendered, so querying it races the re-render. Escape
+        is idempotent and leaves the feed untouched.
+        """
+        if not self.page:
+            return
+        try:
+            await self.page.keyboard.press("Escape")
+        except Exception:
+            pass
+        # Wait until the panel is actually gone, otherwise the next card's
+        # click lands on the overlay instead of the feed.
+        try:
+            await self.page.wait_for_function(
+                "() => !document.querySelector("
+                "'div[role=\"region\"] [data-item-id=\"address\"]')",
+                timeout=5000,
+            )
+        except Exception:
+            logger.debug("Detail panel did not close in time")
+        await self.page.wait_for_timeout(300)
 
     async def _scroll_results(self, max_scrolls: int):
         """Scroll the results feed until the bottom is reached."""
