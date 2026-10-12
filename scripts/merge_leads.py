@@ -38,7 +38,12 @@ def merge(srcs, dst: str) -> tuple:
             rows = list(reader)
         total += len(rows)
         for row in rows:
-            key = (row.get("name") or "").strip().lower()
+            name = (row.get("name") or "").strip()
+            # A place with no name yields "." from Maps, which would otherwise
+            # become its own bucket and then win on richness over real rows.
+            if not name or len(name) <= 2:
+                continue
+            key = name.lower()
             prev = merged.get(key)
             # Take the new row wholesale when it carries more, else fill only
             # the blanks — that is what repairs a field after a fix.
