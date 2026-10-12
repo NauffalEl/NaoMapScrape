@@ -33,6 +33,9 @@ class Collector:
         self.on_progress = on_progress
         self.details = details
         self._stop = False
+        # Place URLs already visited, so a place found under a second keyword
+        # or location is not loaded again just to rediscover the same fields.
+        self._seen_urls: set = set()
 
     async def run(
         self,
@@ -54,42 +57,49 @@ class Collector:
                 self._emit("running", item, len(collected))
 
                 try:
-                    cards = await self.scraper.search(item.keyword, item.location)
-                    raw = await self.extractor.extract_all(cards)
+                    rows = await self.scraper.search(item.keyword, item.location)
 
-                    # Phone/website only exist in the detail panel, so open it
-                    # per card and enrich. The feed is re-queried on every
-                    # iteration: opening/closing the panel re-renders the list
-                    # and makes a cached ElementHandle click the wrong card.
-                    #
-                    # Only the cards that can still land in the output are
-                    # enriched. Opening a panel costs seconds, so walking the
-                    # whole feed past `limit` wasted most of the runtime.
+                    # Phone/website only exist on the place page, so each card
+                    # is enriched by navigating to its own href. Opening a
+                    # place costs seconds, so only the cards that can still
+                    # land in the output are visited — walking the whole feed
+                    # past `limit` wasted most of the runtime.
                     if self.details:
                         remaining = limit - len(collected)
                         if remaining > 0:
-                            raw = raw[:remaining]
+                            rows = rows[:remaining]
+
+                        # Drop places already seen before navigating. The full
+                        # deduplicator needs the phone and address, which only
+                        # exist on the place page, so it cannot run first; the
+                        # place URL is already on the feed and is a stable
+                        # identifier, which is enough to skip the visit.
+                        unseen = []
+                        for row in rows:
+                            url = row.get("raw_maps_url") or row.get("href")
+                            if url and url in self._seen_urls:
+                                continue
+                            if url:
+                                self._seen_urls.add(url)
+                            unseen.append(row)
+                        if len(unseen) < len(rows):
+                            logger.info(
+                                "Skipping %d already-seen places",
+                                len(rows) - len(unseen),
+                            )
 
                         enriched = []
-                        for idx, data in enumerate(raw):
-                            feed = await self.scraper.page.query_selector_all(
-                                'div[role="article"]'
-                            )
-                            if idx >= len(feed):
-                                break
-                            panel = await self.scraper.open_detail_panel(
-                                feed[idx], expect_name=data.get("raw_name")
+                        for row in unseen:
+                            panel = await self.scraper.open_place(
+                                row["href"], expect_name=row.get("raw_name")
                             )
                             if panel:
-                                data = await self.extractor.extract_detail(panel, data)
-                            await self.scraper.close_detail_panel()
-                            enriched.append(data)
-                        raw = enriched
-                        logger.info(
-                            "Enriched %d cards from detail panels", len(enriched)
-                        )
+                                row = await self.extractor.extract_detail(panel, row)
+                            enriched.append(row)
+                        rows = enriched
+                        logger.info("Enriched %d cards from place pages", len(rows))
 
-                    leads = self.parser.parse_all(raw, item.keyword, item.location)
+                    leads = self.parser.parse_all(rows, item.keyword, item.location)
                     leads = self._apply_website_filter(leads, website_filter)
                     fresh = self.deduplicator.filter(leads)
 
